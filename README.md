@@ -1,6 +1,6 @@
-<h1 align='center'>Cod for the paper "Single-seed generation of Brownian paths and integrals
+<h1 align='center'>Code for the paper "Single-seed generation of Brownian paths and integrals
 for adaptive and high order SDE solvers"</h1>
-<h2 align='center'>by Andraž Jelinčič, James Foster and Ptrick Kidger</h2>
+<h2 align='center'>by Andraž Jelinčič, James Foster and Patrick Kidger</h2>
 
 The paper is available at TBA.
 
