@@ -12,3 +12,11 @@ The code for the CIR model example is in `notebooks/cir_model.ipynb`.
 Neal's funnel example is split between two notebooks:
  - `notebooks/langevin.ipynb` contains the computation of strong orders of solvers on the Neal's funnel Langevin SDE
  - `notebooks/mcmc.ipynb` compares the output distribution of Langevin Monte Carlo against the No-U-Turn Sampler on the Neal's funnel model
+
+To use the code, clone this repository and install the requirements:
+
+```bash
+git clone https://github.com/your-username-here/Single-seed_BrownianMotion.git
+cd Single-seed_BrownianMotion/
+pip install -e .
+```

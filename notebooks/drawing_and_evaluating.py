@@ -1,4 +1,4 @@
-from test.helpers import simple_sde_order
+from mcmc.helpers import simple_sde_order
 from typing import Optional
 
 import diffrax
