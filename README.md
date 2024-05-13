@@ -16,7 +16,7 @@ Neal's funnel example is split between two notebooks:
 To use the code, clone this repository and install the requirements:
 
 ```bash
-git clone https://github.com/your-username-here/Single-seed_BrownianMotion.git
+git clone https://github.com/andyElking/Single-seed_BrownianMotion.git
 cd Single-seed_BrownianMotion/
 pip install -e .
 ```
