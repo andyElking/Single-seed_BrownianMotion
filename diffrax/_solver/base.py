@@ -1,6 +1,14 @@
 import abc
 from collections.abc import Callable
-from typing import Generic, Optional, Type, TYPE_CHECKING, TypeVar
+from typing import (
+    Any,
+    ClassVar,
+    Generic,
+    get_args,
+    get_origin,
+    TYPE_CHECKING,
+    TypeVar,
+)
 
 import equinox as eqx
 import jax.lax as lax
@@ -20,7 +28,7 @@ from .._custom_types import Args, BoolScalarLike, DenseInfo, RealScalarLike, VF,
 from .._heuristics import is_sde
 from .._local_interpolation import AbstractLocalInterpolation
 from .._solution import RESULTS, update_result
-from .._term import AbstractTerm
+from .._term import AbstractTerm, MultiTerm
 
 
 _SolverState = TypeVar("_SolverState")
@@ -28,7 +36,7 @@ _SolverState = TypeVar("_SolverState")
 
 def vector_tree_dot(a, b):
     return jtu.tree_map(
-        lambda bi: jnp.tensordot(a, bi, axes=1, precision=lax.Precision.HIGHEST),  # pyright: ignore
+        lambda bi: jnp.tensordot(a, bi, axes=1, precision=lax.Precision.HIGHEST),
         b,
     )
 
@@ -49,6 +57,18 @@ class _MetaAbstractSolver(type(eqx.Module), type):
 _set_metaclass = dict(metaclass=_MetaAbstractSolver)
 
 
+def _term_compatible_contr_kwargs(term_structure):
+    origin = get_origin(term_structure)
+    if origin is MultiTerm:
+        [terms] = get_args(term_structure)
+        return tuple(_term_compatible_contr_kwargs(term) for term in get_args(terms))
+    if origin is not None:
+        term_structure = origin
+    if isinstance(term_structure, type) and issubclass(term_structure, AbstractTerm):
+        return {}
+    return jtu.tree_map(_term_compatible_contr_kwargs, term_structure)
+
+
 class AbstractSolver(eqx.Module, Generic[_SolverState], **_set_metaclass):
     """Abstract base class for all differential equation solvers.
 
@@ -57,19 +77,24 @@ class AbstractSolver(eqx.Module, Generic[_SolverState], **_set_metaclass):
     """
 
     # What PyTree structure `terms` should have when used with this solver.
-    term_structure: AbstractClassVar[PyTree[Type[AbstractTerm]]]
+    term_structure: AbstractClassVar[PyTree[type[AbstractTerm]]]
     # How to interpolate the solution in between steps.
     interpolation_cls: AbstractClassVar[Callable[..., AbstractLocalInterpolation]]
 
-    def order(self, terms: PyTree[AbstractTerm]) -> Optional[int]:
+    # Any keyword arguments needed in `_term_compatible` in `_integrate.py`.
+    term_compatible_contr_kwargs: ClassVar[PyTree[dict[str, Any]]] = property(
+        lambda self: _term_compatible_contr_kwargs(self.term_structure)
+    )
+
+    def order(self, terms: PyTree[AbstractTerm]) -> int | None:
         """Order of the solver for solving ODEs."""
         return None
 
-    def strong_order(self, terms: PyTree[AbstractTerm]) -> Optional[RealScalarLike]:
+    def strong_order(self, terms: PyTree[AbstractTerm]) -> RealScalarLike | None:
         """Strong order of the solver for solving SDEs."""
         return None
 
-    def error_order(self, terms: PyTree[AbstractTerm]) -> Optional[RealScalarLike]:
+    def error_order(self, terms: PyTree[AbstractTerm]) -> RealScalarLike | None:
         """Order of the error estimate used for adaptive stepping.
 
         The default (slightly heuristic) implementation is as follows.
@@ -122,7 +147,7 @@ class AbstractSolver(eqx.Module, Generic[_SolverState], **_set_metaclass):
         args: Args,
         solver_state: _SolverState,
         made_jump: BoolScalarLike,
-    ) -> tuple[Y, Optional[Y], DenseInfo, _SolverState, RESULTS]:
+    ) -> tuple[Y, Y | None, DenseInfo, _SolverState, RESULTS]:
         """Make a single step of the solver.
 
         Each step is made over the specified interval $[t_0, t_1]$.
@@ -180,8 +205,10 @@ class AbstractSolver(eqx.Module, Generic[_SolverState], **_set_metaclass):
 
 
 class AbstractImplicitSolver(AbstractSolver[_SolverState]):
-    """Indicates that this is an implicit differential equation solver, and as such
-    that it should take a root finder as an argument.
+    """Indicates that this is an implicit differential equation solver.
+
+    Subclasses must define `.root_finder` and `.root_find_max_steps` as a dataclass
+    fields or as properties.
     """
 
     root_finder: AbstractVar[optx.AbstractRootFinder]
@@ -213,6 +240,8 @@ class AbstractWrappedSolver(AbstractSolver[_SolverState]):
 
     Inherit from this class if that is desired behaviour. (Do not inherit from this
     class if that is not desired behaviour.)
+
+    Subclasses must define `.solver` as a dataclass field or as a property.
     """
 
     solver: AbstractVar[AbstractSolver]
@@ -250,13 +279,17 @@ class HalfSolver(
     def interpolation_cls(self):  # pyright: ignore
         return self.solver.interpolation_cls
 
-    def order(self, terms: PyTree[AbstractTerm]) -> Optional[int]:
+    @property
+    def term_compatible_contr_kwargs(self):
+        return self.solver.term_compatible_contr_kwargs
+
+    def order(self, terms: PyTree[AbstractTerm]) -> int | None:
         return self.solver.order(terms)
 
-    def strong_order(self, terms: PyTree[AbstractTerm]) -> Optional[RealScalarLike]:
+    def strong_order(self, terms: PyTree[AbstractTerm]) -> RealScalarLike | None:
         return self.solver.strong_order(terms)
 
-    def error_order(self, terms: PyTree[AbstractTerm]) -> Optional[RealScalarLike]:
+    def error_order(self, terms: PyTree[AbstractTerm]) -> RealScalarLike | None:
         if is_sde(terms):
             order = self.strong_order(terms)
             if order is not None:
@@ -286,7 +319,7 @@ class HalfSolver(
         args: Args,
         solver_state: _SolverState,
         made_jump: BoolScalarLike,
-    ) -> tuple[Y, Optional[Y], DenseInfo, _SolverState, RESULTS]:
+    ) -> tuple[Y, Y | None, DenseInfo, _SolverState, RESULTS]:
         original_solver_state = solver_state
         thalf = t0 + 0.5 * (t1 - t0)
 

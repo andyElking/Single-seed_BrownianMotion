@@ -1,8 +1,9 @@
 import abc
 from collections.abc import Callable
-from typing import Generic, Optional, TypeVar
+from typing import Generic, TypeVar
 
 import equinox as eqx
+from equinox import AbstractVar
 from jaxtyping import PyTree
 
 from .._custom_types import Args, BoolScalarLike, IntScalarLike, RealScalarLike, VF, Y
@@ -11,7 +12,7 @@ from .._term import AbstractTerm
 
 
 _ControllerState = TypeVar("_ControllerState")
-_Dt0 = TypeVar("_Dt0", None, RealScalarLike, Optional[RealScalarLike])
+_Dt0 = TypeVar("_Dt0", bound=RealScalarLike | None)
 
 
 class AbstractStepSizeController(eqx.Module, Generic[_ControllerState, _Dt0]):
@@ -45,7 +46,7 @@ class AbstractStepSizeController(eqx.Module, Generic[_ControllerState, _Dt0]):
         dt0: _Dt0,
         args: Args,
         func: Callable[[PyTree[AbstractTerm], RealScalarLike, Y, Args], VF],
-        error_order: Optional[RealScalarLike],
+        error_order: RealScalarLike | None,
     ) -> tuple[RealScalarLike, _ControllerState]:
         r"""Determines the size of the first step, and initialise any hidden state for
         the step size controller.
@@ -77,7 +78,7 @@ class AbstractStepSizeController(eqx.Module, Generic[_ControllerState, _Dt0]):
         y0: Y,
         y1_candidate: Y,
         args: Args,
-        y_error: Optional[Y],
+        y_error: Y | None,
         error_order: RealScalarLike,
         controller_state: _ControllerState,
     ) -> tuple[
@@ -127,3 +128,33 @@ class AbstractStepSizeController(eqx.Module, Generic[_ControllerState, _Dt0]):
             happened successfully, or if it failed for some reason. (e.g. hitting a
             minimum allowed step size in the solver.)
         """
+
+
+class AbstractAdaptiveStepSizeController(
+    AbstractStepSizeController[_ControllerState, _Dt0]
+):
+    """Indicates an adaptive step size controller.
+
+    Accepts tolerances `rtol` and `atol`. When used in conjunction with an implicit
+    solver ([`diffrax.AbstractImplicitSolver`][]), then these tolerances will
+    automatically be used as the tolerances for the nonlinear solver passed to the
+    implicit solver, if they are not specified manually.
+    """
+
+    rtol: AbstractVar[RealScalarLike]
+    atol: AbstractVar[RealScalarLike]
+    norm: AbstractVar[Callable[[PyTree], RealScalarLike]]
+
+    def __check_init__(self):
+        if self.rtol is None or self.atol is None:
+            raise ValueError(
+                "The default values for `rtol` and `atol` were removed in Diffrax "
+                "version 0.1.0. (As the choice of tolerance is nearly always "
+                "something that you, as an end user, should make an explicit choice "
+                "about.)\n"
+                "If you want to match the previous defaults then specify "
+                "`rtol=1e-3`, `atol=1e-6`. For example:\n"
+                "```\n"
+                "diffrax.PIDController(rtol=1e-3, atol=1e-6)\n"
+                "```\n"
+            )

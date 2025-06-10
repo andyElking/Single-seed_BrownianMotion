@@ -1,6 +1,5 @@
 from collections.abc import Callable
-from typing import ClassVar
-from typing_extensions import TypeAlias
+from typing import Any, ClassVar, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +9,7 @@ from equinox.internal import ω
 from .._custom_types import Args, BoolScalarLike, DenseInfo, RealScalarLike, VF, Y
 from .._local_interpolation import LocalLinearInterpolation
 from .._solution import RESULTS
-from .._term import AbstractTerm, MultiTerm, ODETerm
+from .._term import AbstractTerm, MultiTerm
 from .base import AbstractItoSolver, AbstractStratonovichSolver
 
 
@@ -42,20 +41,22 @@ class StratonovichMilstein(AbstractStratonovichSolver):
         Note that this commutativity condition is not checked.
     """  # noqa: E501
 
-    term_structure: ClassVar = MultiTerm[tuple[ODETerm, AbstractTerm]]
+    term_structure: ClassVar = MultiTerm[
+        tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]
+    ]
     interpolation_cls: ClassVar[
         Callable[..., LocalLinearInterpolation]
     ] = LocalLinearInterpolation
 
     def order(self, terms):
-        raise ValueError("`StratonovichMilstein` should not used to solve ODEs.")
+        raise ValueError("`StratonovichMilstein` should not be used to solve ODEs.")
 
     def strong_order(self, terms):
         return 1  # assuming commutative noise
 
     def init(
         self,
-        terms: MultiTerm[tuple[ODETerm, AbstractTerm]],
+        terms: MultiTerm[tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]],
         t0: RealScalarLike,
         t1: RealScalarLike,
         y0: Y,
@@ -65,7 +66,7 @@ class StratonovichMilstein(AbstractStratonovichSolver):
 
     def step(
         self,
-        terms: MultiTerm[tuple[ODETerm, AbstractTerm]],
+        terms: MultiTerm[tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]],
         t0: RealScalarLike,
         t1: RealScalarLike,
         y0: Y,
@@ -101,6 +102,9 @@ class StratonovichMilstein(AbstractStratonovichSolver):
         return drift.vf(t0, y0, args), diffusion.vf(t0, y0, args)
 
 
+StratonovichMilstein.__init__.__doc__ = """**Arguments:** None"""
+
+
 class ItoMilstein(AbstractItoSolver):
     r"""Milstein's method; Itô version.
 
@@ -116,20 +120,22 @@ class ItoMilstein(AbstractItoSolver):
         Note that this commutativity condition is not checked.
     """  # noqa: E501
 
-    term_structure: ClassVar = MultiTerm[tuple[ODETerm, AbstractTerm]]
+    term_structure: ClassVar = MultiTerm[
+        tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]
+    ]
     interpolation_cls: ClassVar[
         Callable[..., LocalLinearInterpolation]
     ] = LocalLinearInterpolation
 
     def order(self, terms):
-        raise ValueError("`ItoMilstein` should not used to solve ODEs.")
+        raise ValueError("`ItoMilstein` should not be used to solve ODEs.")
 
     def strong_order(self, terms):
         return 1  # assuming commutative noise
 
     def init(
         self,
-        terms: MultiTerm[tuple[ODETerm, AbstractTerm]],
+        terms: MultiTerm[tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]],
         t0: RealScalarLike,
         t1: RealScalarLike,
         y0: Y,
@@ -139,7 +145,7 @@ class ItoMilstein(AbstractItoSolver):
 
     def step(
         self,
-        terms: MultiTerm[tuple[ODETerm, AbstractTerm]],
+        terms: MultiTerm[tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]],
         t0: RealScalarLike,
         t1: RealScalarLike,
         y0: Y,
@@ -169,7 +175,7 @@ class ItoMilstein(AbstractItoSolver):
         # ΔwΔw_{j1 j2} = Δw_{j1} Δw_{j2} if j1 != j2;
         # ΔwΔw_{j j} = Δw_{j} Δw_{j} - Δt.
         #
-        # In particular note that that "-Δt" means ΔwΔw is not rank-1. This is what
+        # In particular note that "-Δt" means ΔwΔw is not rank-1. This is what
         # makes the Stratonovich case so much simpler: the only mathematical difference
         # there is that the "-Δt" isn't present, but then dwdw decomposes, which
         # simplifies the computation immensely.
@@ -211,10 +217,11 @@ class ItoMilstein(AbstractItoSolver):
         leaves_ΔwΔw = []
         for i1, l1 in enumerate(leaves_Δw):
             for i2, l2 in enumerate(leaves_Δw):
-                leaf = jnp.tensordot(l1[..., None], l2[None, ...], axes=1)
+                leaf = jnp.tensordot(jnp.conj(l1[..., None]), l2[None, ...], axes=1)
                 if i1 == i2:
                     eye = jnp.eye(l1.size).reshape(l1.shape + l1.shape)
-                    leaf = leaf - Δt * eye
+                    with jax.numpy_dtype_promotion("standard"):
+                        leaf = leaf - Δt * eye
                 leaves_ΔwΔw.append(leaf)
         tree_ΔwΔw = tree_Δw.compose(tree_Δw)
         ΔwΔw = jtu.tree_unflatten(tree_ΔwΔw, leaves_ΔwΔw)
@@ -236,7 +243,9 @@ class ItoMilstein(AbstractItoSolver):
             # _g0 has structure (tree(y0), leaf(y0))
             _, _jvp = jax.jvp(_to_vjp, (y0,), (_g0,))
             # jvp has structure (tree(g0), leaf(g0))
-            _jvp_matrix = jax.jacfwd(lambda _Δw: diffusion.prod(_jvp, _Δw))(Δw)
+            _jvp_matrix = jax.jacfwd(
+                lambda _Δw: diffusion.prod(_jvp, _Δw), holomorphic=jnp.iscomplexobj(Δw)
+            )(Δw)
             # _jvp_matrix has structure (tree(y0), tree(Δw), leaf(y0), leaf(Δw))
             return _jvp_matrix
 
@@ -282,7 +291,9 @@ class ItoMilstein(AbstractItoSolver):
         Δw_treedef = jtu.tree_structure(Δw)
         # g0 has structure (tree(g0), leaf(g0))
         # Which we now transform into its isomorphic matrix form, as above.
-        g0_matrix = jax.jacfwd(lambda _Δw: diffusion.prod(g0, _Δw))(Δw)
+        g0_matrix = jax.jacfwd(
+            lambda _Δw: diffusion.prod(g0, _Δw), holomorphic=jnp.iscomplexobj(Δw)
+        )(Δw)
         # g0_matrix has structure (tree(y0), tree(Δw), leaf(y0), leaf(Δw))
         g0_matrix = jtu.tree_transpose(y_treedef, Δw_treedef, g0_matrix)
         # g0_matrix has structure (tree(Δw), tree(y0), leaf(y0), leaf(Δw))
@@ -300,7 +311,7 @@ class ItoMilstein(AbstractItoSolver):
         def __dot(_v0, _ΔwΔw):
             # _v0 has structure (leaf(y0), leaf(Δw), leaf(Δw))
             # _ΔwΔw has structure (leaf(Δw), leaf(Δw))
-            _out = jnp.tensordot(_v0, _ΔwΔw, axes=jnp.ndim(_ΔwΔw))
+            _out = jnp.tensordot(jnp.conj(_v0), _ΔwΔw, axes=jnp.ndim(_ΔwΔw))
             # _out has structure (leaf(y0),)
             return _out
 
@@ -360,10 +371,13 @@ class ItoMilstein(AbstractItoSolver):
 
     def func(
         self,
-        terms: MultiTerm[tuple[ODETerm, AbstractTerm]],
+        terms: MultiTerm[tuple[AbstractTerm[Any, RealScalarLike], AbstractTerm]],
         t0: RealScalarLike,
         y0: Y,
         args: Args,
     ) -> VF:
         drift, diffusion = terms.terms
         return drift.vf(t0, y0, args), diffusion.vf(t0, y0, args)
+
+
+ItoMilstein.__init__.__doc__ = """**Arguments:** None"""

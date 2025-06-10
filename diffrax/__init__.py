@@ -1,9 +1,8 @@
-import importlib.metadata
-
 from ._adjoint import (
     AbstractAdjoint as AbstractAdjoint,
     BacksolveAdjoint as BacksolveAdjoint,
     DirectAdjoint as DirectAdjoint,
+    ForwardMode as ForwardMode,
     ImplicitAdjoint as ImplicitAdjoint,
     RecursiveCheckpointAdjoint as RecursiveCheckpointAdjoint,
 )
@@ -14,14 +13,21 @@ from ._brownian import (
     VirtualBrownianTree as VirtualBrownianTree,
 )
 from ._custom_types import (
-    levy_tree_transpose as levy_tree_transpose,
-    LevyArea as LevyArea,
-    LevyVal as LevyVal,
+    AbstractBrownianIncrement as AbstractBrownianIncrement,
+    AbstractSpaceTimeLevyArea as AbstractSpaceTimeLevyArea,
+    AbstractSpaceTimeTimeLevyArea as AbstractSpaceTimeTimeLevyArea,
+    BrownianIncrement as BrownianIncrement,
+    SpaceTimeLevyArea as SpaceTimeLevyArea,
+    SpaceTimeTimeLevyArea as SpaceTimeTimeLevyArea,
 )
 from ._event import (
-    AbstractDiscreteTerminatingEvent as AbstractDiscreteTerminatingEvent,
-    DiscreteTerminatingEvent as DiscreteTerminatingEvent,
-    SteadyStateEvent as SteadyStateEvent,
+    # Deliberately not provided with `X as X` as these are now deprecated, so we'd like
+    # static type checkers to warn about using them.
+    AbstractDiscreteTerminatingEvent,  # noqa: F401
+    DiscreteTerminatingEvent,  # noqa: F401
+    Event as Event,
+    steady_state_event as steady_state_event,
+    SteadyStateEvent,  # noqa: F401
 )
 from ._global_interpolation import (
     AbstractGlobalInterpolation as AbstractGlobalInterpolation,
@@ -41,6 +47,12 @@ from ._local_interpolation import (
 )
 from ._misc import adjoint_rms_seminorm as adjoint_rms_seminorm
 from ._path import AbstractPath as AbstractPath
+from ._progress_meter import (
+    AbstractProgressMeter as AbstractProgressMeter,
+    NoProgressMeter as NoProgressMeter,
+    TextProgressMeter as TextProgressMeter,
+    TqdmProgressMeter as TqdmProgressMeter,
+)
 from ._root_finder import (
     VeryChord as VeryChord,
     with_stepsize_controller_tols as with_stepsize_controller_tols,
@@ -58,6 +70,7 @@ from ._solver import (
     AbstractDIRK as AbstractDIRK,
     AbstractERK as AbstractERK,
     AbstractESDIRK as AbstractESDIRK,
+    AbstractFosterLangevinSRK as AbstractFosterLangevinSRK,
     AbstractImplicitSolver as AbstractImplicitSolver,
     AbstractItoSolver as AbstractItoSolver,
     AbstractRungeKutta as AbstractRungeKutta,
@@ -72,13 +85,11 @@ from ._solver import (
     CalculateJacobian as CalculateJacobian,
     Dopri5 as Dopri5,
     Dopri8 as Dopri8,
-    DriftImplicitEulerCIR as DriftImplicitEulerCIR,
     Euler as Euler,
     EulerHeun as EulerHeun,
     GeneralShARK as GeneralShARK,
     HalfSolver as HalfSolver,
     Heun as Heun,
-    HOStS as HOStS,
     ImplicitEuler as ImplicitEuler,
     ItoMilstein as ItoMilstein,
     KenCarp3 as KenCarp3,
@@ -90,6 +101,7 @@ from ._solver import (
     LeapfrogMidpoint as LeapfrogMidpoint,
     Midpoint as Midpoint,
     MultiButcherTableau as MultiButcherTableau,
+    QUICSORT as QUICSORT,
     Ralston as Ralston,
     ReversibleHeun as ReversibleHeun,
     SEA as SEA,
@@ -98,15 +110,16 @@ from ._solver import (
     ShOULD as ShOULD,
     Sil3 as Sil3,
     SlowRK as SlowRK,
-    SORT as SORT,
     SPaRK as SPaRK,
     SRA1 as SRA1,
+    StochasticButcherTableau as StochasticButcherTableau,
     StratonovichMilstein as StratonovichMilstein,
     Tsit5 as Tsit5,
 )
 from ._step_size_controller import (
     AbstractAdaptiveStepSizeController as AbstractAdaptiveStepSizeController,
     AbstractStepSizeController as AbstractStepSizeController,
+    ClipStepSizeController as ClipStepSizeController,
     ConstantStepSize as ConstantStepSize,
     PIDController as PIDController,
     StepTo as StepTo,
@@ -114,11 +127,9 @@ from ._step_size_controller import (
 from ._term import (
     AbstractTerm as AbstractTerm,
     ControlTerm as ControlTerm,
-    LangevinTerm as LangevinTerm,
     MultiTerm as MultiTerm,
     ODETerm as ODETerm,
+    UnderdampedLangevinDiffusionTerm as UnderdampedLangevinDiffusionTerm,
+    UnderdampedLangevinDriftTerm as UnderdampedLangevinDriftTerm,
     WeaklyDiagonalControlTerm as WeaklyDiagonalControlTerm,
 )
-
-
-__version__ = importlib.metadata.version("diffrax")

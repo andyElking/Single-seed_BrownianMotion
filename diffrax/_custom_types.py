@@ -1,6 +1,4 @@
-import typing
-from typing import Any, Literal, Optional, TYPE_CHECKING, Union
-from typing_extensions import TypeAlias
+from typing import Any, TYPE_CHECKING
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -14,73 +12,119 @@ from jaxtyping import (
     Float,
     Int,
     PyTree,
+    Real,
     Shaped,
 )
 
 
 if TYPE_CHECKING:
-    BoolScalarLike = Union[bool, Array, np.ndarray]
-    FloatScalarLike = Union[float, Array, np.ndarray]
-    IntScalarLike = Union[int, Array, np.ndarray]
-elif getattr(typing, "GENERATING_DOCUMENTATION", False):
-    # Skip the union with Array in docs.
-    BoolScalarLike = bool
-    FloatScalarLike = float
-    IntScalarLike = int
-
-    #
-    # Because they appear in our docstrings, we also monkey-patch some non-Diffrax
-    # types that have similar defined-in-one-place, exported-in-another behaviour.
-    #
-
-    jtu.Partial.__module__ = "jax.tree_util"
-
+    BoolScalarLike = bool | Array | np.ndarray
+    FloatScalarLike = float | Array | np.ndarray
+    IntScalarLike = int | Array | np.ndarray
+    RealScalarLike = bool | int | float | Array | np.ndarray
 else:
     BoolScalarLike = Bool[ArrayLike, ""]
     FloatScalarLike = Float[ArrayLike, ""]
     IntScalarLike = Int[ArrayLike, ""]
+    RealScalarLike = Real[ArrayLike, ""]
 
-
-RealScalarLike = Union[FloatScalarLike, IntScalarLike]
 
 Y = PyTree[Shaped[ArrayLike, "?*y"], "Y"]
 VF = PyTree[Shaped[ArrayLike, "?*vf"], "VF"]
 Control = PyTree[Shaped[ArrayLike, "?*control"], "C"]
 Args = PyTree[Any]
 
+BM = PyTree[Shaped[ArrayLike, "?*bm"], "BM"]
+
 DenseInfo = dict[str, PyTree[Array]]
-DenseInfos = dict[str, PyTree[Shaped[Array, "times ..."]]]
+DenseInfos = dict[str, PyTree[Shaped[Array, "times-1 ..."]]]
 BufferDenseInfos = dict[str, PyTree[eqxi.MaybeBuffer[Shaped[Array, "times ..."]]]]
 sentinel: Any = eqxi.doc_repr(object(), "sentinel")
 
-LevyArea: TypeAlias = Literal["", "space-time", "space-time-time"]
+
+class AbstractBrownianIncrement(eqx.Module):
+    """
+    Abstract base class for all Brownian increments.
+    """
+
+    dt: eqx.AbstractVar[PyTree[FloatScalarLike, "BM"]]
+    W: eqx.AbstractVar[BM]
 
 
-class LevyVal(eqx.Module):
-    dt: PyTree
-    W: PyTree
-    H: Optional[PyTree]
-    bar_H: Optional[PyTree]
-    K: Optional[PyTree]
-    bar_K: Optional[PyTree]
+class AbstractSpaceTimeLevyArea(AbstractBrownianIncrement):
+    """
+    Abstract base class for all Space Time Levy Areas.
+    """
+
+    H: eqx.AbstractVar[BM]
 
 
-def levy_tree_transpose(tree_shape, levy_area: LevyArea, tree: PyTree):
-    """Helper that takes a PyTree of LevyVals and transposes
-    into a LevyVal of PyTrees.
+class AbstractSpaceTimeTimeLevyArea(AbstractSpaceTimeLevyArea):
+    """
+    Abstract base class for all Space Time Time Levy Areas.
+    """
+
+    K: eqx.AbstractVar[BM]
+
+
+class BrownianIncrement(AbstractBrownianIncrement):
+    """
+    Pytree containing the `dt` time increment and `W` the Brownian motion.
+    """
+
+    dt: PyTree[FloatScalarLike, "BM"]
+    W: BM
+
+
+class SpaceTimeLevyArea(AbstractSpaceTimeLevyArea):
+    """
+    Pytree containing the `dt` time increment, `W` the Brownian motion, and `H`
+    the Space Time Levy Area.
+    """
+
+    dt: PyTree[FloatScalarLike, "BM"]
+    W: BM
+    H: BM
+
+
+class SpaceTimeTimeLevyArea(AbstractSpaceTimeTimeLevyArea):
+    """
+    Pytree containing the `dt` time increment, `W` the Brownian motion, `H`
+    the Space Time Levy Area, and `K` the Space Time Time Levy Area.
+    """
+
+    dt: PyTree[FloatScalarLike, "BM"]
+    W: BM
+    H: BM
+    K: BM
+
+
+AbstractBrownianIncrement.__module__ = "diffrax"
+AbstractSpaceTimeLevyArea.__module__ = "diffrax"
+AbstractSpaceTimeTimeLevyArea.__module__ = "diffrax"
+BrownianIncrement.__module__ = "diffrax"
+SpaceTimeLevyArea.__module__ = "diffrax"
+SpaceTimeTimeLevyArea.__module__ = "diffrax"
+
+
+def levy_tree_transpose(
+    tree_shape, tree: PyTree[AbstractBrownianIncrement]
+) -> AbstractBrownianIncrement:
+    """Helper that takes a `PyTree `of `AbstractBrownianIncrement`s and transposes
+    into an `AbstractBrownianIncrement` of `PyTree`s.
 
     **Arguments:**
 
     - `tree_shape`: Corresponds to `outer_treedef` in `jax.tree_transpose`.
-    - `levy_area`: can be `""` or `"space-time"`, which indicates
-    which fields of the LevyVal will have values.
-    - `tree`: the PyTree of LevyVals to transpose.
+    - `tree`: the `PyTree` of `AbstractBrownianIncrement`s to transpose.
 
     **Returns:**
 
-    A `LevyVal` of PyTrees.
+    An `AbstractBrownianIncrement` of `PyTree`s.
     """
-    inner_tree = jtu.tree_leaves(tree, is_leaf=lambda x: isinstance(x, LevyVal))[0]
+    inner_tree = jtu.tree_leaves(
+        tree, is_leaf=lambda x: isinstance(x, AbstractBrownianIncrement)
+    )[0]
     inner_tree_shape = jtu.tree_structure(inner_tree)
     return jtu.tree_transpose(
         outer_treedef=jtu.tree_structure(tree_shape),

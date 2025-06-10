@@ -7,17 +7,14 @@ from typing import (
     get_args,
     get_origin,
     Literal,
-    Optional,
-    Tuple,
     TYPE_CHECKING,
-    Union,
+    TypeAlias,
 )
-from typing_extensions import TypeAlias
 
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
-import jax.core
+import jax.extend as jex
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -59,8 +56,8 @@ class ButcherTableau:
     a_lower: tuple[np.ndarray, ...]
 
     # Implicit RK methods
-    a_diagonal: Optional[np.ndarray] = None
-    a_predictor: Optional[tuple[np.ndarray, ...]] = None
+    a_diagonal: np.ndarray | None = None
+    a_predictor: tuple[np.ndarray, ...] | None = None
     c1: float = 0.0
 
     # Properties implied by the above tableaus, e.g. used to define fast-paths.
@@ -189,7 +186,7 @@ Let `k` denote the number of stages of the solver.
 - `a_predictor`: optional. Used in a similar way to `a_lower`; specifies the linear
     combination of previous stages to use as a predictor for the solution to the
     implicit problem at that stage. See
-    [the developer documentation](../../devdocs/predictor_dirk). Used for diagonal
+    [the developer documentation](../../devdocs/predictor_dirk.md). Used for diagonal
     implicit Runge--Kutta methods only.
 
 Whether the solver exhibits either the FSAL or SSAL properties is determined
@@ -242,7 +239,7 @@ class CalculateJacobian(enum.IntEnum):
     second_stage = 3
 
 
-_SolverState: TypeAlias = Optional[tuple[BoolScalarLike, PyTree[Array]]]
+_SolverState: TypeAlias = tuple[BoolScalarLike, PyTree[Array]] | None
 
 
 # TODO: examine termination criterion for Newton iteration
@@ -315,7 +312,7 @@ def _filter_stop_gradient(x):
 
 
 def _is_jaxpr(x):
-    return isinstance(x, (jax.core.Jaxpr, jax.core.ClosedJaxpr))
+    return isinstance(x, (jex.core.Jaxpr, jex.core.ClosedJaxpr))
 
 
 def _filter_maybe_cond(pred, branch, value):
@@ -356,9 +353,9 @@ class AbstractRungeKutta(AbstractAdaptiveSolver[_SolverState]):
     instance of [`diffrax.CalculateJacobian`][].
     """
 
-    scan_kind: Union[None, Literal["lax", "checkpointed", "bounded"]] = None
+    scan_kind: None | Literal["lax", "checkpointed", "bounded"] = None
 
-    tableau: AbstractClassVar[Union[ButcherTableau, MultiButcherTableau]]
+    tableau: AbstractClassVar[ButcherTableau | MultiButcherTableau]
     calculate_jacobian: AbstractClassVar[CalculateJacobian]
 
     def __init_subclass__(cls, **kwargs):
@@ -377,7 +374,7 @@ class AbstractRungeKutta(AbstractAdaptiveSolver[_SolverState]):
                 if hasattr(cls, "term_structure"):
                     assert get_origin(cls.term_structure) is MultiTerm
                     [_tmp] = get_args(cls.term_structure)
-                    assert get_origin(_tmp) in (tuple, Tuple)
+                    assert get_origin(_tmp) in (tuple, tuple)
                     assert all(issubclass(x, AbstractTerm) for x in get_args(_tmp))
                 else:
                     terms = tuple(
@@ -779,7 +776,7 @@ class AbstractRungeKutta(AbstractAdaptiveSolver[_SolverState]):
 
         y0_leaves = jtu.tree_leaves(y0)
         if len(y0_leaves) == 0:
-            tableau_dtype = lxi.default_floating_dtype()  # pyright: ignore
+            tableau_dtype = lxi.default_floating_dtype()
         else:
             tableau_dtype = jnp.result_type(*y0_leaves)
 
@@ -807,7 +804,7 @@ class AbstractRungeKutta(AbstractAdaptiveSolver[_SolverState]):
             )
             implicit_predictor = np.zeros(
                 (num_stages, num_stages),
-                dtype=np.result_type(*implicit_tableau.a_predictor),  # pyright: ignore
+                dtype=np.result_type(*implicit_tableau.a_predictor),
             )
             for i, a_predictor_i in enumerate(implicit_tableau.a_predictor):  # pyright: ignore
                 implicit_predictor[i + 1, : i + 1] = a_predictor_i
@@ -964,7 +961,7 @@ class AbstractRungeKutta(AbstractAdaptiveSolver[_SolverState]):
                         assert implicit_tableau.a_diagonal[0] == 0  # pyright: ignore
                         assert len(set(implicit_tableau.a_diagonal[1:])) == 1  # pyright: ignore
                         jac_stage_index = 1
-                        stage_index = eqxi.nonbatchable(stage_index)
+                    stage_index = eqxi.nonbatchable(stage_index)
                     # These `stop_gradients` are needed to work around the lack of
                     # symbolic zeros in `custom_vjp`s.
                     if eval_fs:
