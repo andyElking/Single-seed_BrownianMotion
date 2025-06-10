@@ -2,7 +2,6 @@ import functools as ft
 import inspect
 import re
 from collections.abc import Callable
-from typing import Optional
 
 import jax
 import jax.core
@@ -10,23 +9,33 @@ import jax.tree_util as jtu
 
 from ._adjoint import BacksolveAdjoint, DirectAdjoint, RecursiveCheckpointAdjoint
 from ._brownian import AbstractBrownianPath, VirtualBrownianTree
+from ._custom_types import BrownianIncrement
 from ._heuristics import is_cde, is_sde
 from ._integrate import diffeqsolve
 from ._misc import adjoint_rms_seminorm
 from ._saveat import SubSaveAt
 from ._solver import (
     AbstractImplicitSolver,
+    AbstractItoSolver,
+    AbstractSRK,
+    AbstractStratonovichSolver,
     Dopri5,
     Dopri8,
+    GeneralShARK,
     Kvaerno3,
     Kvaerno4,
     Kvaerno5,
     LeapfrogMidpoint,
     ReversibleHeun,
+    SEA,
     SemiImplicitEuler,
+    ShARK,
+    SlowRK,
+    SPaRK,
+    SRA1,
     Tsit5,
 )
-from ._step_size_controller import PIDController
+from ._step_size_controller import ClipStepSizeController, PIDController
 
 
 def citation(*args, **kwargs):
@@ -120,11 +129,11 @@ def citation(*args, **kwargs):
 _diffeqsignature = inspect.signature(diffeqsolve)
 
 
-citation_rules: list[Callable[..., Optional[str]]] = []
+citation_rules: list[Callable[..., str | None]] = []
 
 
 _thesis_cite = r"""
-phdthesis{kidger2021on,
+@phdthesis{kidger2021on,
     title={{O}n {N}eural {D}ifferential {E}quations},
     author={Patrick Kidger},
     year={2021},
@@ -148,14 +157,14 @@ _end = r"""
 _reference_regex = re.compile(r"```bibtex([^`]*)```")
 
 
-@ft.lru_cache(maxsize=None)
+@ft.cache
 def _parse_reference(obj) -> str:
     references = _reference_regex.findall(obj.__doc__)
     [reference] = [inspect.cleandoc(ref) for ref in references]
     return reference
 
 
-@ft.lru_cache(maxsize=None)
+@ft.cache
 def _parse_reference_multi(obj) -> list[str]:
     references = _reference_regex.findall(obj.__doc__)
     return [inspect.cleandoc(ref) for ref in references]
@@ -338,28 +347,36 @@ def _virtual_brownian_tree(terms):
     is_vbt = lambda x: isinstance(x, VirtualBrownianTree)
     leaves = jtu.tree_leaves(terms, is_leaf=is_vbt)
     if any(is_vbt(leaf) for leaf in leaves):
-        vbt_ref, _ = _parse_reference_multi(VirtualBrownianTree)
+        vbt_ref, single_seed_ref, _ = _parse_reference_multi(VirtualBrownianTree)
         return (
             r"""
 % You are simulating Brownian motion using a virtual Brownian tree, which was introduced
-% in:
+% in the following two papers:
 """
             + vbt_ref
+            + "\n"
+            + single_seed_ref
         )
 
 
 @citation_rules.append
 def _space_time_levy_area(terms):
-    has_levy_area = lambda x: isinstance(x, AbstractBrownianPath) and x.levy_area != ""
+    has_levy_area = (
+        lambda x: isinstance(x, AbstractBrownianPath)
+        and x.levy_area != BrownianIncrement
+    )
     leaves = jtu.tree_leaves(terms, is_leaf=has_levy_area)
     if any(has_levy_area(leaf) for leaf in leaves):
-        _, levy_area_ref = _parse_reference_multi(VirtualBrownianTree)
+        _, single_seed_ref, foster_ref = _parse_reference_multi(VirtualBrownianTree)
         return (
             r"""
-% You are simulating Brownian motion using space-time Levy area, the formulae for which
-% were developed in:
-"""
-            + levy_area_ref
+                % You are simulating Brownian motion using Lévy area,
+                % the formulae for which are due to:
+                """
+            + single_seed_ref
+            + "\n\n"
+            + r"""% and Theorem 6.1.6 of:"""
+            + foster_ref
         )
 
 
@@ -374,7 +391,15 @@ def _backsolve_rms_norm(adjoint):
 
 @citation_rules.append
 def _explicit_solver(solver, terms=None):
-    if not isinstance(solver, AbstractImplicitSolver) and not is_sde(terms):
+    if not isinstance(
+        solver,
+        (
+            AbstractImplicitSolver,
+            AbstractSRK,
+            AbstractItoSolver,
+            AbstractStratonovichSolver,
+        ),
+    ) and not is_sde(terms):
         return r"""
 % You are using an explicit solver, and may wish to cite the standard textbook:
 @book{hairer2008solving-i,
@@ -467,6 +492,12 @@ def _solvers(solver, saveat=None):
         Kvaerno5,
         ReversibleHeun,
         LeapfrogMidpoint,
+        ShARK,
+        SRA1,
+        SlowRK,
+        GeneralShARK,
+        SPaRK,
+        SEA,
     ):
         return (
             r"""
@@ -539,11 +570,21 @@ def _auto_dt0(dt0):
 
 
 @citation_rules.append
-def _pid_controller(stepsize_controller, terms=None):
+def _stepsize_controller(stepsize_controller, terms=None):
+    out = _stepsize_controller_impl(terms, stepsize_controller)
+    if len(out) == 0:
+        return None
+    else:
+        return "\n\n".join(x.strip() for x in out)
+
+
+def _stepsize_controller_impl(terms, stepsize_controller) -> set[str]:
+    out = set()
     if type(stepsize_controller) is PIDController:
         if is_sde(terms):
-            return r"""
-% The use of PI and PI controllers to adapt step sizes for SDEs are from:
+            out.add(
+                r"""
+% The use of adaptive step size controllers for SDEs are from:
 @article{burrage2004adaptive,
   title={Adaptive stepsize based on control theory for stochastic
          differential equations},
@@ -569,6 +610,7 @@ def _pid_controller(stepsize_controller, terms=None):
   pages={791–-812},
 }
 """
+            )
         else:
             no_p = stepsize_controller.pcoeff == 0
             no_d = stepsize_controller.dcoeff == 0
@@ -576,7 +618,8 @@ def _pid_controller(stepsize_controller, terms=None):
             _no_tracer(no_d, "stepsize_controller.dcoeff")
             if no_d:
                 if no_p:
-                    return r"""
+                    out.add(
+                        r"""
 % The use of an I-controller to adapt step sizes is from Section II.4 of:
 @book{hairer2008solving-i,
   address={Berlin},
@@ -588,8 +631,10 @@ def _pid_controller(stepsize_controller, terms=None):
   year={2008}
 }
 """
+                    )
                 else:
-                    return r"""
+                    out.add(
+                        r"""
 % The use of a PI-controller to adapt step sizes is from Section IV.2 of:
 @book{hairer2002solving-ii,
   address={Berlin},
@@ -610,9 +655,11 @@ def _pid_controller(stepsize_controller, terms=None):
     pages={281--310}
 }
 """
+                    )
             else:
-                return r"""
-% The use of a PID controller to adapt step sizes is from:
+                out.add(
+                    r"""
+% The use of a PID-controller to adapt step sizes is from:
 @article{soderlind2003digital,
     title={{D}igital {F}ilters in {A}daptive {T}ime-{S}tepping,
     author={Gustaf S{\"o}derlind},
@@ -623,3 +670,16 @@ def _pid_controller(stepsize_controller, terms=None):
     pages={1--26}
 }
 """
+                )
+    elif type(stepsize_controller) is ClipStepSizeController:
+        out.update(_stepsize_controller_impl(terms, stepsize_controller.controller))
+        if stepsize_controller.store_rejected_steps is not None and is_sde(terms):
+            out.add(
+                r"""
+% You are adaptively solving an SDE whilst revisiting rejected time points. This is a
+% subtle point required for the correctness of adaptive noncommutative SDE solves, as
+% found in:
+"""
+                + _parse_reference(ClipStepSizeController)
+            )
+    return out

@@ -1,57 +1,70 @@
 from typing import ClassVar
 
+import equinox.internal as eqxi
 import numpy as np
 
 from .base import AbstractStratonovichSolver
-from .srk import AbstractSRK, AdditiveNoiseCoefficients, StochasticButcherTableau
+from .srk import AbstractSRK, AdditiveCoeffs, StochasticButcherTableau
 
 
-cfs_w = AdditiveNoiseCoefficients(
+_coeffs_w = AdditiveCoeffs(
     a=np.array([0.0, 5 / 6]),
-    b=np.array(1.0),
+    b_sol=np.array(1.0),
 )
 
-cfs_hh = AdditiveNoiseCoefficients(
+_coeffs_hh = AdditiveCoeffs(
     a=np.array([1.0, 1.0]),
-    b=np.array(0.0),
+    b_sol=np.array(0.0),
 )
-
 
 _tab = StochasticButcherTableau(
-    c=np.array([5 / 6]),
+    a=[np.array([5 / 6])],
     b_sol=np.array([0.4, 0.6]),
     b_error=np.array([-0.6, 0.6]),
-    a=[np.array([5 / 6])],
-    cfs_w=cfs_w,
-    cfs_hh=cfs_hh,
+    c=np.array([5 / 6]),
+    coeffs_w=_coeffs_w,
+    coeffs_hh=_coeffs_hh,
+    coeffs_kk=None,
+    ignore_stage_f=None,
+    ignore_stage_g=None,
 )
 
 
 class ShARK(AbstractSRK, AbstractStratonovichSolver):
-    r"""Shifted Additive-noise Runge-Kutta method for SDEs by James Foster.
-    Applied to SDEs with additive noise, it has strong order 1.5.
-    Uses two evaluations of the vector field per step.
+    r"""Shifted Additive-noise Runge-Kutta method for additive SDEs.
 
-    Based on equation $(6.1)$ in
+    Makes two evaluations of the drift and diffusion per step and has a strong order
+    1.5.
+
+    This is the recommended choice for SDEs with additive noise.
+
+    See also [`diffrax.SRA1`][], which is very similar.
 
     ??? cite "Reference"
 
+        This solver is based on equation (6.1) in
+
         ```bibtex
-        @misc{foster2023high,
-          title={High order splitting methods for SDEs satisfying
-            a commutativity condition},
-          author={James Foster and Goncalo dos Reis and Calum Strange},
-          year={2023},
-          eprint={2210.17543},
-          archivePrefix={arXiv},
-          primaryClass={math.NA}
+        @article{foster2023high,
+            title={High order splitting methods for SDEs satisfying a commutativity
+                   condition},
+            author={James Foster and Goncalo dos Reis and Calum Strange},
+            year={2023},
+            journal={arXiv:2210.17543},
+        }
         ```
     """
 
     tableau: ClassVar[StochasticButcherTableau] = _tab
 
     def order(self, terms):
+        del terms
         return 2
 
     def strong_order(self, terms):
+        del terms
         return 1.5
+
+
+eqxi.doc_remove_args("scan_kind")(ShARK.__init__)
+ShARK.__init__.__doc__ = """**Arguments:** None"""

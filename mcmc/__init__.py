@@ -1,1 +1,1 @@
-from .main import run_sortmc as run_sortmc
+from .funnel_mcmc import run_funnel_mcmc as run_funnel_mcmc

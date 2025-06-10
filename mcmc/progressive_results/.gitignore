@@ -1,0 +1,4 @@
+plots
+log_*
+*.pkl
+!good_results/*.pkl

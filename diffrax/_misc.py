@@ -1,11 +1,12 @@
 from collections.abc import Callable
-from typing import Any, cast, Optional
+from typing import Any, cast
 
 import jax
 import jax.core
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 import optimistix as optx
 from jaxtyping import Array, ArrayLike, PyTree, Shaped
 
@@ -40,7 +41,7 @@ def _fill_forward(
 @jax.jit
 def fill_forward(
     ys: Shaped[Array, " times *channels"],
-    replace_nans_at_start: Optional[Shaped[Array, " *channels"]] = None,
+    replace_nans_at_start: Shaped[Array, " *channels"] | None = None,
 ) -> Shaped[Array, " times *channels"]:
     """Fill-forwards over missing data (represented as NaN).
 
@@ -129,7 +130,7 @@ def left_broadcast_to(arr, shape):
     return jnp.broadcast_to(arr[indices], shape)
 
 
-def split_by_tree(key, tree, is_leaf: Optional[Callable[[PyTree], bool]] = None):
+def split_by_tree(key, tree, is_leaf: Callable[[PyTree], bool] | None = None):
     """Like jax.random.split but accepts tree as a second argument and produces
     a tree of keys with the same structure.
     """
@@ -146,12 +147,8 @@ def static_select(pred: BoolScalarLike, a: ArrayLike, b: ArrayLike) -> ArrayLike
     # predicate is statically known.
     # This in turn allows us to perform some trace-time optimisations that XLA isn't
     # smart enough to do on its own.
-    if (
-        type(pred) is not bool
-        and type(jax.core.get_aval(pred)) is jax.core.ConcreteArray
-    ):
-        with jax.ensure_compile_time_eval():
-            pred = pred.item()
+    if isinstance(pred, (np.ndarray, np.generic)) and pred.shape == ():
+        pred = cast(BoolScalarLike, pred.item())
     if pred is True:
         return a
     elif pred is False:
@@ -163,7 +160,10 @@ def static_select(pred: BoolScalarLike, a: ArrayLike, b: ArrayLike) -> ArrayLike
 
 
 def upcast_or_raise(
-    x: ArrayLike, array_for_dtype: ArrayLike, x_name: str, dtype_name: str
+    x: ArrayLike,
+    array_for_dtype: ArrayLike | jnp.dtype,
+    x_name: str,
+    dtype_name: str,
 ):
     """If `JAX_NUMPY_DTYPE_PROMOTION=strict`, then this will raise an error if
     `jnp.result_type(x, array_for_dtype)` is not the same as `array_for_dtype.dtype`.
@@ -177,7 +177,7 @@ def upcast_or_raise(
     target_dtype = jnp.result_type(array_for_dtype)
     with jax.numpy_dtype_promotion("standard"):
         promote_dtype = jnp.result_type(x_dtype, target_dtype)
-    config_value = jax.config.jax_numpy_dtype_promotion
+    config_value = jax.config.jax_numpy_dtype_promotion  # pyright: ignore
     if config_value == "strict":
         if target_dtype != promote_dtype:
             raise ValueError(

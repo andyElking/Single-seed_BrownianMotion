@@ -1,8 +1,8 @@
 import abc
 import functools as ft
 import warnings
-from collections.abc import Iterable
-from typing import Any, Optional, Union
+from collections.abc import Callable, Iterable
+from typing import Any, cast
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -16,8 +16,16 @@ from equinox.internal import ω
 
 from ._heuristics import is_sde, is_unsafe_sde
 from ._saveat import save_y, SaveAt, SubSaveAt
-from ._solver import AbstractItoSolver, AbstractRungeKutta, AbstractStratonovichSolver
+from ._solver import (
+    AbstractItoSolver,
+    AbstractRungeKutta,
+    AbstractSRK,
+    AbstractStratonovichSolver,
+)
 from ._term import AbstractTerm, AdjointTerm
+
+
+ω = cast(Callable, ω)
 
 
 def _is_none(x):
@@ -118,7 +126,7 @@ class AbstractAdjoint(eqx.Module):
         terms,
         solver,
         stepsize_controller,
-        discrete_terminating_event,
+        event,
         saveat,
         t0,
         t1,
@@ -128,6 +136,7 @@ class AbstractAdjoint(eqx.Module):
         init_state,
         passed_solver_state,
         passed_controller_state,
+        progress_meter,
     ) -> Any:
         """Runs the main solve loop. Subclasses can override this to provide custom
         backpropagation behaviour; see for example the implementation of
@@ -168,19 +177,21 @@ def _uncallable(*args, **kwargs):
 
 
 class RecursiveCheckpointAdjoint(AbstractAdjoint):
-    """Backpropagate through [`diffrax.diffeqsolve`][] by differentiating the numerical
-    solution directly. This is sometimes known as "discretise-then-optimise", or
-    described as "backpropagation through the solver".
+    """Enables support for backpropagating through [`diffrax.diffeqsolve`][] by
+    differentiating the numerical solution directly. This is sometimes known as
+    "discretise-then-optimise", or described as "backpropagation through the solver".
 
     Uses a binomial checkpointing scheme to keep memory usage low.
 
     For most problems this is the preferred technique for backpropagating through a
-    differential equation.
+    differential equation, and as such it is the default for [`diffrax.diffeqsolve`][].
 
     !!! info
 
         Note that this cannot be forward-mode autodifferentiated. (E.g. using
-        `jax.jvp`.) Try using [`diffrax.DirectAdjoint`][] if that is something you need.
+        `jax.jvp`.) Try using [`diffrax.ForwardMode`][] if you need forward-mode
+        autodifferentiation, or [`diffrax.DirectAdjoint`][] if you need both forward and
+        reverse-mode autodifferentiation.
 
     ??? cite "References"
 
@@ -248,7 +259,7 @@ class RecursiveCheckpointAdjoint(AbstractAdjoint):
         ```
     """
 
-    checkpoints: Optional[int] = None
+    checkpoints: int | None = None
 
     def loop(
         self,
@@ -266,7 +277,7 @@ class RecursiveCheckpointAdjoint(AbstractAdjoint):
         if is_unsafe_sde(terms):
             raise ValueError(
                 "`adjoint=RecursiveCheckpointAdjoint()` does not support "
-                "`UnsafeBrownianPath`. Consider using `adjoint=DirectAdjoint()` "
+                "`UnsafeBrownianPath`. Consider using `adjoint=ForwardMode()` "
                 "instead."
             )
         if self.checkpoints is None and max_steps is None:
@@ -319,16 +330,19 @@ the computation will not be autodifferentiable.
 
 
 class DirectAdjoint(AbstractAdjoint):
-    """A variant of [`diffrax.RecursiveCheckpointAdjoint`][]. The differences are that
-    `DirectAdjoint`:
+    """A variant of [`diffrax.RecursiveCheckpointAdjoint`][] that is also able to
+    support forward-mode autodifferentiation, whilst being less computationally
+    efficient. (Under-the-hood it is using several nested layers of `jax.lax.scan`s and
+    `jax.checkpoint`s, so that the cost of the solve increases with `max_steps`, even
+    if you don't need that many steps to perform the solve in practice.)
 
-    - Is less time+memory efficient at reverse-mode autodifferentiation (specifically,
-      these will increase every time `max_steps` increases passes a power of 16);
-    - Cannot be reverse-mode autodifferentated if `max_steps is None`;
-    - Supports forward-mode autodifferentiation.
+    !!! warning
 
-    So unless you need forward-mode autodifferentiation then
-    [`diffrax.RecursiveCheckpointAdjoint`][] should be preferred.
+        This method is not recommended! In practice you should almost always use either
+        [`diffrax.RecursiveCheckpointAdjoint`][] or [`diffrax.ForwardMode`][], depending
+        on whether you need reverse or forward mode autodifferentiation. As this method
+        is far less computationally efficient, then in practice it is only useful if you
+        really **really** need to be able to support both kinds of autodifferentiation.
     """
 
     def loop(
@@ -367,7 +381,10 @@ class DirectAdjoint(AbstractAdjoint):
             msg = None
         # Support forward-mode autodiff.
         # TODO: remove this hack once we can JVP through custom_vjps.
-        if isinstance(solver, AbstractRungeKutta) and solver.scan_kind is None:
+        if (
+            isinstance(solver, (AbstractRungeKutta, AbstractSRK))
+            and solver.scan_kind is None
+        ):
             solver = eqx.tree_at(
                 lambda s: s.scan_kind, solver, "bounded", is_leaf=_is_none
             )
@@ -386,6 +403,9 @@ class DirectAdjoint(AbstractAdjoint):
                 final_state, msg=msg, symbolic=True
             )
         return final_state
+
+
+DirectAdjoint.__init__.__doc__ = """**Arguments:** None"""
 
 
 def _vf(ys, residual, inputs):
@@ -425,7 +445,15 @@ def _solve(inputs):
     )
 
 
-def _frozenset(x: Union[object, Iterable[object]]) -> frozenset[object]:
+# Unwrap jaxtyping decorator during tests, so that these are global functions.
+# This is needed to ensure `optx.implicit_jvp` is happy.
+if _vf.__globals__["__name__"].startswith("jaxtyping"):
+    _vf = _vf.__wrapped__  # pyright: ignore[reportFunctionMemberAccess]
+if _solve.__globals__["__name__"].startswith("jaxtyping"):
+    _solve = _solve.__wrapped__  # pyright: ignore[reportFunctionMemberAccess]
+
+
+def _frozenset(x: object | Iterable[object]) -> frozenset[object]:
     try:
         iter_x = iter(x)  # pyright: ignore
     except TypeError:
@@ -438,7 +466,8 @@ class ImplicitAdjoint(AbstractAdjoint):
     r"""Backpropagate via the [implicit function theorem](https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem).
 
     This is used when solving towards a steady state, typically using
-    [`diffrax.SteadyStateEvent`][]. In this case, the output of the solver is $y(θ)$
+    [`diffrax.Event`][] where the condition function is obtained by calling
+    [`diffrax.steady_state_event`][]. In this case, the output of the solver is $y(θ)$
     for which $f(t, y(θ), θ) = 0$. (Where $θ$ corresponds to all parameters found
     through `terms` and `args`, but not `y0`.) Then we can skip backpropagating through
     the solver and instead directly compute
@@ -551,7 +580,7 @@ def _loop_backsolve_bwd(
     self,
     solver,
     stepsize_controller,
-    discrete_terminating_event,
+    event,
     saveat,
     t0,
     t1,
@@ -559,15 +588,16 @@ def _loop_backsolve_bwd(
     max_steps,
     throw,
     init_state,
+    progress_meter,
 ):
-    assert discrete_terminating_event is None
+    assert event is None
 
     #
     # Unpack our various arguments. Delete a lot of things just to make sure we're not
     # using them later.
     #
 
-    del perturbed, init_state, t1
+    del perturbed, init_state, t1, progress_meter
     ts, ys = residuals
     del residuals
     grad_final_state, _ = grad_final_state__aux_stats
@@ -711,24 +741,26 @@ class BacksolveAdjoint(AbstractAdjoint):
     "optimise-then-discretise", the "continuous adjoint method" or simply the "adjoint
     method".
 
-    This method implies very low memory usage, but the
-    computed gradients will only be approximate. As such other methods are generally
-    preferred unless exceeding memory is a concern.
+    !!! warning
+
+        This method is not recommended! It was popularised by
+        [this paper](https://arxiv.org/abs/1806.07366), and for this reason it is
+        sometimes erroneously believed to be a better method for backpropagation than
+        other choices available.
+
+        In practice whilst `BacksolveAdjoint` indeed has very low memory usage, its
+        computed gradients will also be approximate. As the checkpointing of
+        [`diffrax.RecursiveCheckpointAdjoint`][] also gives low memory usage, then in
+        practice that is essentially always preferred.
 
     This will compute gradients with respect to the `terms`, `y0` and `args` arguments
     passed to [`diffrax.diffeqsolve`][]. If you attempt to compute gradients with
     respect to anything else (for example `t0`, or arguments passed via closure), then
-    a `CustomVJPException` will be raised. See also
-    [this FAQ](../../further_details/faq/#im-getting-a-customvjpexception)
+    a `CustomVJPException` will be raised by JAX. See also
+    [this FAQ](../further_details/faq.md#im-getting-a-customvjpexception)
     entry.
 
-    !!! note
-
-        This was popularised by [this paper](https://arxiv.org/abs/1806.07366). For
-        this reason it is sometimes erroneously believed to be a better method for
-        backpropagation than the other choices available.
-
-    !!! warning
+    !!! info
 
         Using this method prevents computing forward-mode autoderivatives of
         [`diffrax.diffeqsolve`][]. (That is to say, `jax.jvp` will not work.)
@@ -774,7 +806,7 @@ class BacksolveAdjoint(AbstractAdjoint):
         init_state,
         passed_solver_state,
         passed_controller_state,
-        discrete_terminating_event,
+        event,
         **kwargs,
     ):
         if jtu.tree_structure(saveat.subs, is_leaf=_is_subsaveat) != jtu.tree_structure(
@@ -816,7 +848,7 @@ class BacksolveAdjoint(AbstractAdjoint):
                 "`diffrax.BacksolveAdjoint` is only compatible with solvers that take "
                 "a single term."
             )
-        if discrete_terminating_event is not None:
+        if event is not None:
             raise NotImplementedError(
                 "`diffrax.BacksolveAdjoint` is not compatible with events."
             )
@@ -833,8 +865,57 @@ class BacksolveAdjoint(AbstractAdjoint):
             saveat=saveat,
             init_state=init_state,
             solver=solver,
-            discrete_terminating_event=discrete_terminating_event,
+            event=event,
             **kwargs,
         )
         final_state = _only_transpose_ys(final_state)
         return final_state, aux_stats
+
+
+class ForwardMode(AbstractAdjoint):
+    """Enables support for forward-mode automatic differentiation (like `jax.jvp` or
+    `jax.jacfwd`) through [`diffrax.diffeqsolve`][]. (As such this shouldn't really be
+    called an 'adjoint' method -- which is a word that refers to any kind of
+    reverse-mode autodifferentiation. Ah well.)
+
+    This is useful when we have many more outputs than inputs to a function - for
+    instance during parameter inference for ODE models with least-squares solvers such
+    as
+    [`optimistix.LevenbergMarquardt`](https://docs.kidger.site/optimistix/api/least_squares/#optimistix.LevenbergMarquardt),
+    that operate on the residuals.
+
+    For the autodifferentiation geeks: this is 'discretise then optimise' forward-mode,
+    that is to say it operates through the internal numerics of the solver. (As compared
+    to 'optimise then discretise' forward mode, which would set up another ODE to solve
+    in parallel.)
+    """  # noqa: E501
+
+    def loop(
+        self,
+        *,
+        solver,
+        throw,
+        passed_solver_state,
+        passed_controller_state,
+        **kwargs,
+    ):
+        del throw, passed_solver_state, passed_controller_state
+        inner_while_loop = eqx.Partial(_inner_loop, kind="lax")
+        outer_while_loop = eqx.Partial(_outer_loop, kind="lax")
+        # Support forward-mode autodiff.
+        # TODO: remove this hack once we can JVP through custom_vjps.
+        if (
+            isinstance(solver, (AbstractRungeKutta, AbstractSRK))
+            and solver.scan_kind is None
+        ):
+            solver = eqx.tree_at(lambda s: s.scan_kind, solver, "lax", is_leaf=_is_none)
+        final_state = self._loop(
+            solver=solver,
+            inner_while_loop=inner_while_loop,
+            outer_while_loop=outer_while_loop,
+            **kwargs,
+        )
+        return final_state
+
+
+ForwardMode.__init__.__doc__ = """**Arguments:** None"""

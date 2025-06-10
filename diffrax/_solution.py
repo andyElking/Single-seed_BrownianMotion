@@ -1,8 +1,9 @@
-from typing import Any, Optional
+import warnings
+from typing import Any
 
 import jax
 import optimistix as optx
-from jaxtyping import Array, Bool, PyTree, Real, Shaped
+from jaxtyping import Array, Bool, Int, PyTree, Real, Shaped
 
 from ._custom_types import BoolScalarLike, RealScalarLike
 from ._global_interpolation import DenseInterpolation
@@ -11,16 +12,41 @@ from ._path import AbstractPath
 
 class RESULTS(optx.RESULTS):  # pyright: ignore
     successful = ""
-    discrete_terminating_event_occurred = (
-        "Terminating differential equation solve because a discrete terminating event "
-        "occurred."
-    )
     max_steps_reached = (
         "The maximum number of solver steps was reached. Try increasing `max_steps`."
     )
     dt_min_reached = (
         "The minimum step size was reached in the differential equation solver."
     )
+    event_occurred = (
+        "Terminating differential equation solve because an event occurred."
+    )
+    max_steps_rejected = (
+        "Maximum number of rejected steps was reached. Consider increasing "
+        "`diffrax.ClipStepSizeController(store_rejected_steps==...)`."
+    )
+    internal_error = (
+        "An internal error occurred in Diffrax. This is a bug! Please open a GitHub "
+        "issue with a minimum working example. (<50 lines of code is ideal)"
+    )
+
+
+# Backward compatibility
+# Evil monkey-patching so that we don't mess with how `Enumeration`s work.
+
+
+@property
+def discrete_terminating_event_occurred(self):
+    warnings.warn(
+        "`diffrax.RESULTS.discrete_terminating_event_occurred` is deprecated in "
+        "favour of `diffrax.RESULTS.terminating_event_occurred`. This will be "
+        "removed in some future version of Diffrax.",
+        stacklevel=2,
+    )
+    return self.event_occurred
+
+
+RESULTS.discrete_terminating_event_occurred = discrete_terminating_event_occurred  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def is_okay(result: RESULTS) -> Bool[Array, ""]:
@@ -32,10 +58,8 @@ def is_successful(result: RESULTS) -> Bool[Array, ""]:
     return result == RESULTS.successful
 
 
-# TODO: In the future we may support other event types, in which case this function
-# should be updated.
 def is_event(result: RESULTS) -> Bool[Array, ""]:
-    return result == RESULTS.discrete_terminating_event_occurred
+    return result == RESULTS.event_occurred
 
 
 def update_result(old_result: RESULTS, new_result: RESULTS) -> RESULTS:
@@ -67,14 +91,18 @@ class Solution(AbstractPath):
     - `ys`: The value of the solution at each of the times in `ts`. Might `None` if no
         values were saved.
     - `stats`: Statistics for the solve (number of steps etc.).
-    - `result`: Integer specifying the success or cause of failure of the solve. A
-        value of `0` corresponds to a successful solve. Any other value is a failure.
-        A human-readable message can be obtained by looking up messages via
-        `diffrax.RESULTS[<integer>]`.
+    - `result`: A [`diffrax.RESULTS`][] specifying the success or cause of failure of
+        the solve. A human-readable message is displayed if printed. No message means
+        success!
     - `solver_state`: If saved, the final internal state of the numerical solver.
     - `controller_state`: If saved, the final internal state for the step size
         controller.
     - `made_jump`: If saved, the final internal state for the jump tracker.
+    - `event_mask`: If using [events](./events.md), a boolean mask indicating which
+        event triggered. This is a PyTree of bools, with the same PyTree stucture as the
+        event condition functions. It will be all `False` if no events triggered;
+        otherwise it will have precisely one `True`, corresponding to the event that
+        triggered.
 
     !!! note
 
@@ -93,17 +121,19 @@ class Solution(AbstractPath):
     # the structure of `subs`.
     # SaveAt(fn=...) means that `ys` will then follow with arbitrary sub-dependent
     # PyTree structures.
-    ts: Optional[PyTree[Real[Array, " ?times"], " S"]]
-    ys: Optional[PyTree[Shaped[Array, "?times ?*shape"], "S ..."]]
-    interpolation: Optional[DenseInterpolation]
+    ts: PyTree[Real[Array, " ?times"], " S"] | None
+    ys: PyTree[Shaped[Array, "?times ?*shape"], "S ..."] | None
+    num_steps_running: PyTree[Int[Array, " ?times"], " S"] | None
+    interpolation: DenseInterpolation | None
     stats: dict[str, Any]
     result: RESULTS
-    solver_state: Optional[PyTree]
-    controller_state: Optional[PyTree]
-    made_jump: Optional[BoolScalarLike]
+    solver_state: PyTree | None
+    controller_state: PyTree | None
+    made_jump: BoolScalarLike | None
+    event_mask: PyTree[BoolScalarLike] | None
 
     def evaluate(
-        self, t0: RealScalarLike, t1: Optional[RealScalarLike] = None, left: bool = True
+        self, t0: RealScalarLike, t1: RealScalarLike | None = None, left: bool = True
     ) -> PyTree[Shaped[Array, "?*shape"], " Y"]:
         """If dense output was saved, then evaluate the solution at any point in the
         region of integration `self.t0` to `self.t1`.

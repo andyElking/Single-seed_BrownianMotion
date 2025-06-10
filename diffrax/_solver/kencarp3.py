@@ -1,6 +1,7 @@
 from collections.abc import Callable
-from typing import ClassVar, Optional, TYPE_CHECKING
+from typing import ClassVar, TYPE_CHECKING
 
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -107,7 +108,7 @@ class KenCarpInterpolation(AbstractLocalInterpolation):
         self.k = k
 
     def evaluate(
-        self, t0: RealScalarLike, t1: Optional[RealScalarLike] = None, left: bool = True
+        self, t0: RealScalarLike, t1: RealScalarLike | None = None, left: bool = True
     ) -> PyTree:
         del left
         if t1 is not None:
@@ -117,7 +118,8 @@ class KenCarpInterpolation(AbstractLocalInterpolation):
         explicit_k, implicit_k = self.k
         k = (explicit_k**ω + implicit_k**ω).ω
         coeffs = t * jax.vmap(lambda row: jnp.polyval(row, t))(self.coeffs)
-        return (self.y0**ω + vector_tree_dot(coeffs, k) ** ω).ω
+        with jax.numpy_dtype_promotion("standard"):
+            return (self.y0**ω + vector_tree_dot(coeffs, k) ** ω).ω
 
 
 class _KenCarp3Interpolation(KenCarpInterpolation):
@@ -169,4 +171,16 @@ class KenCarp3(AbstractRungeKutta, AbstractImplicitSolver):
     root_find_max_steps: int = 10
 
     def order(self, terms):
+        del terms
         return 3
+
+
+eqxi.doc_remove_args("scan_kind")(KenCarp3.__init__)
+KenCarp3.__init__.__doc__ = """**Arguments:**
+
+- `root_finder`: an [Optimistix](https://github.com/patrick-kidger/optimistix) root
+    finder to solve the implicit problem at each stage.
+- `root_find_max_steps`: the maximum number of steps that the root finder is allowed to
+    make before unconditionally rejecting the step. (And trying again with whatever
+    smaller step that adaptive stepsize controller proposes.)
+"""
