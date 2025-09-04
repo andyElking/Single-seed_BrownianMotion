@@ -39,10 +39,10 @@ def run_funnel_mcmc(
 
     t_warmup = warmup_mult * chain_sep
     tol_warmup = warmup_tol_mult * tol
-
+    orig_solver = solver
     if use_adaptive:
         controller_warmup = diffrax.PIDController(
-            rtol=0.0, atol=warmup_tol_mult * tol, pcoeff=0.1, icoeff=0.3, dtmin=2**-6
+            rtol=0.0, atol=warmup_tol_mult * tol, pcoeff=0.1, icoeff=0.4, dtmin=2**-6
         )
         solver = diffrax.HalfSolver(solver)
     else:
@@ -111,11 +111,11 @@ def run_funnel_mcmc(
     avg_steps_warmup = jnp.mean(steps_warmup)
     avg_steps_mcmc = jnp.mean(steps_mcmc)
     grad_evals_per_sample = (avg_steps_mcmc + avg_steps_warmup) / chain_len
-    # When a HalfSolver is used, the number of gradient evaluations is tripled,
-    # but the output of batch_sde_solve already accounts for this.
 
-    if isinstance(solver, diffrax.QUICSORT):
+    if isinstance(orig_solver, diffrax.QUICSORT):
         grad_evals_per_sample *= 2
+    if isinstance(solver, diffrax.HalfSolver):
+        grad_evals_per_sample *= 3
 
     print(
         f"Steps warmup: {avg_steps_warmup}, steps mcmc: {avg_steps_mcmc},"
